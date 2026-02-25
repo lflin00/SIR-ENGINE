@@ -73,8 +73,8 @@ st.set_page_config(page_title="SIR Engine", layout="wide", page_icon="🔍")
 st.title("🔍 SIR Engine")
 st.caption("Semantic duplicate detection, structural compression, and code diffing for Python.")
 
-tab_scan, tab_pack, tab_unpack, tab_verify, tab_diff, tab_about = st.tabs([
-    "Scan", "Pack", "Unpack", "Verify", "Diff", "About"
+tab_scan, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
+    "Scan", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
 ])
 
 
@@ -394,6 +394,221 @@ with tab_diff:
 
 
 # ─────────────────────────────────────────────
+#  MERGE HELPERS
+# ─────────────────────────────────────────────
+
+def remove_function_node(tree: ast.Module, func_name: str) -> ast.Module:
+    """Remove a top-level function definition from an AST."""
+    tree.body = [
+        node for node in tree.body
+        if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name)
+    ]
+    return tree
+
+
+def rename_calls(source: str, old_name: str, new_name: str) -> str:
+    """Rename all calls to old_name -> new_name in source using AST rewrite."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    class CallRenamer(ast.NodeTransformer):
+        def visit_Call(self, node):
+            self.generic_visit(node)
+            if isinstance(node.func, ast.Name) and node.func.id == old_name:
+                node.func.id = new_name
+            elif isinstance(node.func, ast.Attribute) and node.func.attr == old_name:
+                node.func.attr = new_name
+            return node
+
+    new_tree = CallRenamer().visit(tree)
+    ast.fix_missing_locations(new_tree)
+    try:
+        return ast.unparse(new_tree)
+    except Exception:
+        return source
+
+
+def add_import(source: str, func_name: str) -> str:
+    """Add 'from utils import func_name' at the top if not already present."""
+    import_line = f"from utils import {func_name}"
+    if import_line in source:
+        return source
+    lines = source.splitlines()
+    # Insert after any existing imports
+    insert_at = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("import ") or stripped.startswith("from "):
+            insert_at = i + 1
+    lines.insert(insert_at, import_line)
+    return "\n".join(lines)
+
+
+def get_function_source(source: str, func_name: str) -> str:
+    """Extract source of a named top-level function."""
+    try:
+        tree = ast.parse(source)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+                seg = ast.get_source_segment(source, node)
+                if seg:
+                    return seg
+    except SyntaxError:
+        pass
+    return ""
+
+
+# ─────────────────────────────────────────────
+#  MERGE TAB
+# ─────────────────────────────────────────────
+
+with tab_merge:
+    st.subheader("Merge: eliminate duplicate functions from your codebase")
+    st.write(
+        "Upload your `.py` files. SIR finds duplicate function clusters, "
+        "you pick which name to keep for each cluster, and it produces a cleaned-up "
+        "zip with all duplicates removed, calls renamed, and shared functions moved to `utils.py`."
+    )
+
+    merge_uploaded = st.file_uploader(
+        "Upload Python files", type=["py"], accept_multiple_files=True, key="merge_upload"
+    )
+    merge_methods = st.checkbox("Include class methods", value=False, key="merge_methods")
+
+    if st.button("Scan for duplicates", type="primary", key="merge_scan"):
+        if not merge_uploaded:
+            st.warning("Please upload at least one .py file.")
+        else:
+            # Read all files into memory
+            file_sources: Dict[str, str] = {}
+            for f in merge_uploaded:
+                file_sources[f.name] = f.read().decode("utf-8", errors="replace")
+
+            # Scan for duplicates
+            groups: Dict[str, List[Occur]] = defaultdict(list)
+            total_funcs = 0
+            for fname, src in file_sources.items():
+                for qualname, lineno, code in extract_functions(src, fname, merge_methods):
+                    total_funcs += 1
+                    try:
+                        h = hash_source(code, mode="semantic")
+                        groups[h].append(Occur(file=fname, qualname=qualname, lineno=lineno, semantic_hash=h))
+                    except Exception:
+                        pass
+
+            dupes = {h: occ for h, occ in groups.items() if len(occ) >= 2}
+
+            st.session_state["merge_file_sources"] = file_sources
+            st.session_state["merge_dupes"] = {h: [vars(o) for o in occ] for h, occ in dupes.items()}
+            st.session_state["merge_total"] = total_funcs
+
+    # Show results and canonical picker
+    if "merge_dupes" in st.session_state and st.session_state["merge_dupes"]:
+        dupes_data = st.session_state["merge_dupes"]
+        file_sources = st.session_state["merge_file_sources"]
+
+        st.divider()
+        st.success(f"Found **{len(dupes_data)}** duplicate cluster(s) across {len(file_sources)} file(s).")
+        st.write("For each cluster, pick which function name to keep as the canonical version:")
+
+        canonical_choices: Dict[str, str] = {}
+
+        for h, occs in dupes_data.items():
+            names = [o["qualname"] for o in occs]
+            with st.expander(f"Cluster `{h[:16]}...` — {len(occs)} duplicates: {', '.join(f'`{n}`' for n in names)}", expanded=True):
+                cols = st.columns([3, 1])
+                with cols[0]:
+                    choice = st.selectbox(
+                        "Canonical name (keep this one)",
+                        options=names,
+                        key=f"canon_{h}",
+                    )
+                with cols[1]:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown(f"**{len(occs) - 1}** duplicate(s) will be removed")
+                canonical_choices[h] = choice
+
+        st.divider()
+
+        if st.button("🔀 Apply merge and download", type="primary"):
+            # Build modified sources
+            modified_sources: Dict[str, str] = {k: v for k, v in file_sources.items()}
+            utils_functions: Dict[str, str] = {}  # canonical_name -> source
+
+            for h, occs in dupes_data.items():
+                canonical_name = st.session_state.get(f"canon_{h}", occs[0]["qualname"])
+
+                # Find the file containing the canonical function
+                canonical_occ = next((o for o in occs if o["qualname"] == canonical_name), occs[0])
+                canonical_file = canonical_occ["file"]
+                canonical_src = get_function_source(modified_sources[canonical_file], canonical_name)
+
+                if canonical_src:
+                    utils_functions[canonical_name] = canonical_src
+
+                # Process each occurrence
+                for occ in occs:
+                    fname = occ["file"]
+                    func_name = occ["qualname"]
+                    src = modified_sources[fname]
+
+                    # Rename all calls of this function to canonical name
+                    if func_name != canonical_name:
+                        src = rename_calls(src, func_name, canonical_name)
+
+                    # Remove the duplicate function definition (keep canonical in utils.py)
+                    try:
+                        tree = ast.parse(src)
+                        tree = remove_function_node(tree, func_name)
+                        ast.fix_missing_locations(tree)
+                        src = ast.unparse(tree)
+                    except Exception:
+                        pass
+
+                    # Add import from utils
+                    src = add_import(src, canonical_name)
+                    modified_sources[fname] = src
+
+                # Also remove canonical from its original file (it moves to utils.py)
+                try:
+                    src = modified_sources[canonical_file]
+                    tree = ast.parse(src)
+                    tree = remove_function_node(tree, canonical_name)
+                    ast.fix_missing_locations(tree)
+                    modified_sources[canonical_file] = ast.unparse(tree)
+                except Exception:
+                    pass
+
+            # Build utils.py
+            utils_src = '"""utils.py — Canonical functions extracted by SIR Engine merge."""\n\n'
+            for fname, fsrc in utils_functions.items():
+                utils_src += fsrc + "\n\n"
+
+            # Build zip
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for fname, src in modified_sources.items():
+                    zf.writestr(fname, src)
+                zf.writestr("utils.py", utils_src)
+
+            zip_buffer.seek(0)
+
+            total_removed = sum(len(occs) for occs in dupes_data.values())
+            st.success(f"✅ Merged! Removed **{total_removed}** duplicate function(s), moved **{len(utils_functions)}** canonical function(s) to `utils.py`.")
+            st.download_button(
+                "📥 Download merged codebase (.zip)",
+                data=zip_buffer,
+                file_name="merged_codebase.zip",
+                mime="application/zip",
+            )
+
+    elif "merge_dupes" in st.session_state and not st.session_state["merge_dupes"]:
+        st.success("✅ No duplicate functions found — your codebase is already clean!")
+
+
+# ─────────────────────────────────────────────
 #  ABOUT
 # ─────────────────────────────────────────────
 
@@ -417,6 +632,7 @@ Two functions that do the same thing will always produce the **same structural h
 | **Unpack** | Upload `bundle.json` → restore all functions as `.py` files |
 | **Verify** | Upload `bundle.json` + restored files → confirm hashes match |
 | **Diff** | Upload two sets of files → compare their logical structures |
+| **Merge** | Upload `.py` files → remove duplicates and consolidate into `utils.py` |
 
 ---
 
