@@ -1,0 +1,107 @@
+{
+  "0785cc4679143e0527eef5ec12600156": {
+    "python_src": "def addNumbers(a, b):\n    result = a + b\n    return result",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "9a889c6d2e1ae6d511887ee9f1c9fe3732a6872d73a66cbe7524d5dc9197a641",
+    "hash2": "9a889c6d2e1ae6d511887ee9f1c9fe3732a6872d73a66cbe7524d5dc9197a641"
+  },
+  "d81f925fcaff39d0839cc94152e54369": {
+    "python_src": "def findMax(numbers):\n    max_val = numbers[0]\n    for _, n in enumerate(numbers):\n        if n > max_val:\n            max_val = n\n    return max_val",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "0a20995c5092cb0027bae53a4750651028691df2664a23ee9cc3365cf699261f",
+    "hash2": "0a20995c5092cb0027bae53a4750651028691df2664a23ee9cc3365cf699261f"
+  },
+  "d39c3db5eb0acacd3b63b02f003c2efc": {
+    "python_src": "def isPalindrome(s):\n    left = 0\n    right = len(s) - 1\n    while left < right:\n        if s[left] != s[right]:\n            return False\n        left += 1\n        right -= 1\n    return True",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "fc6152be230ba435ae864b8f26111f97261fd711c03c30c77ac9e718585e0ced",
+    "hash2": "fc6152be230ba435ae864b8f26111f97261fd711c03c30c77ac9e718585e0ced"
+  },
+  "df2324352ff35680fe2c52f6d9d01e4e": {
+    "python_src": "def factorial(n):\n    if n == 0:\n        return 1\n    return n * factorial(n-1)",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "0f6b1dbf5a779c076b3d704433f15beabb10ee5003e4c61fcd50ccb1450e8b59",
+    "hash2": "0f6b1dbf5a779c076b3d704433f15beabb10ee5003e4c61fcd50ccb1450e8b59"
+  },
+  "fe3c51b99a9ac68c6a0cc8b2bd10e2b1": {
+    "python_src": "def add_numbers(a: int, b: int) -> int:\n    result = a + b\n    return result",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "90076a20540880b58ff8176e856b874a6376bd64a3ce50b04f6660f80980d2a6",
+    "hash2": "90076a20540880b58ff8176e856b874a6376bd64a3ce50b04f6660f80980d2a6"
+  },
+  "fb9db3c22d40010676d06394f038825b": {
+    "python_src": "def find_max(numbers):\n    max_val = numbers[0]\n    for n in numbers:\n        if n > max_val:\n            max_val = n\n    return max_val",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "e2923056f698817fc9e9664862f64866c5c2f6fbd004ec7064e707816ed5a83c",
+    "hash2": "e2923056f698817fc9e9664862f64866c5c2f6fbd004ec7064e707816ed5a83c"
+  },
+  "d64727a0f8f3f9f2ae5449029ac5da92": {
+    "python_src": "def bubble_sort(arr):\n    n = len(arr)\n    for i in range(n):\n        for j in range(n - i - 1):\n            if arr[j] > arr[j + 1]:\n                temp = arr[j]\n                arr[j] = arr[j + 1]\n                arr[j + 1] = temp",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "e3f5e1a3b59fd176bc64c8b94d9bc45136410d463843cbc6533187d4681f7275",
+    "hash2": "e3f5e1a3b59fd176bc64c8b94d9bc45136410d463843cbc6533187d4681f7275"
+  },
+  "80b213ab443c08188865371f294be276": {
+    "python_src": "def addNumbers(a, b):\n    result = a + b\n    return result",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "9a889c6d2e1ae6d511887ee9f1c9fe3732a6872d73a66cbe7524d5dc9197a641",
+    "hash2": "9a889c6d2e1ae6d511887ee9f1c9fe3732a6872d73a66cbe7524d5dc9197a641"
+  },
+  "596f0f930a7534e01164b65ee5c355b0": {
+    "python_src": "def findMax(numbers):\n    maxVal = numbers[0]\n    for n in numbers:\n        if n > maxVal:\n            maxVal = n\n    return maxVal",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "dc1e53dcf27419d2239a7fe9fe4d630d6af862ad181d8e289a7de7b8942a2789",
+    "hash2": "dc1e53dcf27419d2239a7fe9fe4d630d6af862ad181d8e289a7de7b8942a2789"
+  },
+  "a998e431fc4f63c112e66acf02f2abb6": {
+    "python_src": "def isPalindrome(s):\n    left = 0\n    right = len(s) - 1\n    while left < right:\n        if s[left] != s[right]:\n            return False\n        left += 1\n        right -= 1\n    return True",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "fc6152be230ba435ae864b8f26111f97261fd711c03c30c77ac9e718585e0ced",
+    "hash2": "fc6152be230ba435ae864b8f26111f97261fd711c03c30c77ac9e718585e0ced"
+  },
+  "2e386dea0e1f697fa9dad5f57f4c7e13": {
+    "python_src": "def factorial(n):\n    if n == 0:\n        return 1\n    return n * factorial(n - 1)",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "0f6b1dbf5a779c076b3d704433f15beabb10ee5003e4c61fcd50ccb1450e8b59",
+    "hash2": "0f6b1dbf5a779c076b3d704433f15beabb10ee5003e4c61fcd50ccb1450e8b59"
+  },
+  "b4e39d83200f1b472e0b5a7a98ba5038": {
+    "python_src": "def bubbleSort(arr):\n    n = len(arr)\n    for i in range(n):\n        for j in range(n - i - 1):\n            if arr[j] > arr[j + 1]:\n                temp = arr[j]\n                arr[j] = arr[j + 1]\n                arr[j + 1] = temp\n    return arr",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "db3270a5cd884391bb3aa9e5a3f4fb867ae0370f03a0d65dd607c78a90ace4b1",
+    "hash2": "db3270a5cd884391bb3aa9e5a3f4fb867ae0370f03a0d65dd607c78a90ace4b1"
+  },
+  "4830aa78a0fd1f1706da5938a4d46030": {
+    "python_src": "def factorial(n: int) -> int:\n    if n == 0:\n        return 1\n    return n * factorial(n - 1)",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "1ed7f53bea7e251245cc0d57159713aeb098ee4de9253aea5298382ada541f89",
+    "hash2": "1ed7f53bea7e251245cc0d57159713aeb098ee4de9253aea5298382ada541f89"
+  },
+  "f65a85421731142cabdf9314e58321cb": {
+    "python_src": "def sum_two_values(x: int, y: int) -> int:\n    total = x + y\n    return total",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "065b4c21e8be889e687408bffe25847c675abd9176a50d548e0f1fa095fb1b7a",
+    "hash2": "065b4c21e8be889e687408bffe25847c675abd9176a50d548e0f1fa095fb1b7a"
+  },
+  "1f2211d96771ab908fc906aae0a58a20": {
+    "python_src": "def get_largest(items):\n    biggest = items[0]\n    for val in items:\n        if val > biggest:\n            biggest = val\n    return biggest",
+    "confidence": "HIGH",
+    "error": "",
+    "hash1": "e9ef68c8d8b23c292467854375ba4d888132920d99703747515feb38792f5e6c",
+    "hash2": "e9ef68c8d8b23c292467854375ba4d888132920d99703747515feb38792f5e6c"
+  }
+}
