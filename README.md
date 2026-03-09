@@ -1,115 +1,167 @@
-# SIR Engine
-### Semantic Intermediate Representation — Cross-Language Structural Duplicate Detection
+# SIR Engine — Semantic Code Intelligence
 
-SIR Engine finds functions that do the same thing even if they look completely different — across any programming language.
+**Detect when two functions implement identical logic — across any programming language.**
 
-**[Try it live →](https://sri-engine-7amwtce7a23k7q34cpnxem.streamlit.app)**
+A Java function and a Python function that do the same thing produce the same hash. SIR Engine finds those matches, shows you exactly where the duplicates are, and lets you merge them out of your codebase in one click.
+
+🌐 **Landing page:** [sir-engine.com](https://sir-engine.com)  
+📦 **Web app:** [Live demo](https://sri-engine-7amwtce7a23k7q34cpnxem.streamlit.app)  
+🔌 **VS Code extension:** [Download .vsix](https://github.com/lflin00/SIR-ENGINE/raw/main/sir-engine-0.0.2.vsix)
 
 ---
 
 ## How it works
 
-Every function gets stripped down to its pure logical structure. Variable names, formatting, and comments are removed. What's left gets hashed with SHA-256.
+Most duplicate detection tools compare tokens — they find copy-paste duplicates but miss functions that were rewritten, renamed, or translated between languages.
 
-Two functions with the same hash have the same logic — regardless of what they're called, how they're formatted, or what language they're written in.
+SIR Engine compares **logical structure**:
 
-```python
-def calculate_total(price, tax):    # hash: 4b67fc60...
-    result = price + tax
-    return result
+1. **Translate** — any language gets translated to Python first using an LLM. One parser handles 25+ languages.
+2. **Canonicalize** — variable names, function names, and formatting are stripped. Only pure logical structure remains.
+3. **Hash** — the canonical structure is hashed with SHA-256. Same hash means same logic, guaranteed.
+4. **Match** — every hash is compared against every other. Matching pairs are structural duplicates regardless of language.
+5. **Merge** — remove duplicates in one click. Auto merge or choose manually. Download cleaned files instantly.
 
-def add_values(a, b):               # hash: 4b67fc60...  ← same hash, same logic
-    result = a + b
-    return result
-```
-
-This is called **alpha equivalence** — a concept from lambda calculus (1936). SIR Engine makes it practical.
-
----
-
-## The novel part — LLM as universal IR frontend
-
-Instead of writing a hand-crafted parser for every language, SIR Engine uses an LLM to translate any language to Python first, then runs it through the same pipeline.
-
-This means a Java function and a Python function that implement the same logic will produce the same structural hash. Only one parser was needed.
-
-```java
-// Java
-int calculateTotal(int price, int tax) {
-    int result = price + tax;
-    return result;
-}
-```
-```python
-# Python  
-def add_values(a, b):
-    result = a + b
-    return result
-```
-**Same hash. Detected as structurally identical.**
+This is based on **alpha equivalence** — a concept from mathematics — applied to source code.
 
 ---
 
 ## Features
 
-- **Scan** — find duplicate functions across any codebase with health score (0-100)
-- **GitHub Scanner** — paste any public repo URL, scan without downloading
-- **Merge** — automatically remove duplicates, rename call sites, consolidate into utils
-- **Pack / Unpack** — compress codebases into deduplicated bundles
-- **Diff** — compare two codebases structurally
-- **Verify** — confirm restored files match original hashes
-- **VS Code Extension** — live scanning, health score in status bar, auto-merge with undo
-- **.sir_ignore** — mark intentional duplicates to skip
-
-**Native support:** Python, JavaScript, TypeScript
-
-**Via AI translation:** C, C++, Java, Rust, Go, Ruby, Swift, Kotlin, Scala, C#, PHP, Dart, Lua, Haskell, and more
+| Feature | Description |
+|---|---|
+| 🌐 Web App | Upload files, scan instantly in the browser. No install required. |
+| ⚡ CLI Tool | `sir scan ./src` from any terminal. CI/CD integration with `--strict` flag. |
+| 🔌 VS Code Extension | Scans your workspace. Merge duplicates with diff preview. |
+| 🤖 AI Translation | Cross-language detection via Ollama (local/free) or Claude API. |
+| 📦 Pack & Diff | Export semantic fingerprints as JSON. Compare codebases without sharing source. |
+| 🔀 Merge | Auto merge all duplicates or choose manually per cluster. |
+| 🔒 Private by Default | Files processed in memory, never stored. Fully local with Ollama. |
 
 ---
 
-## Run locally (free AI via Ollama)
+## Supported Languages
+
+**Native** (no AI needed): Python, JavaScript, TypeScript
+
+**AI-powered** (via Ollama or Claude API): Java, Rust, Go, C, C++, C#, Swift, Kotlin, Scala, Ruby, PHP, Haskell, Elixir, Lua, Dart, Julia, R, Nim, Zig, and more.
+
+---
+
+## Quick Start
+
+### Web App
+Go to the [live demo](https://sri-engine-7amwtce7a23k7q34cpnxem.streamlit.app) — no install needed.
+
+### CLI Tool
 
 ```bash
-git clone https://github.com/lflin00/SRI-ENGINE
-cd SRI-ENGINE/SIR_MAIN
-pip install streamlit
+# Clone the repo
+git clone https://github.com/lflin00/SIR-ENGINE.git
+cd SIR-ENGINE
+
+# Add alias
+echo 'alias sir="python3 ~/path/to/SIR-ENGINE/sir_cli.py"' >> ~/.zshrc
+source ~/.zshrc
+
+# Scan a folder
+sir scan ./my_project
+
+# Scan with AI (requires Ollama running locally)
+sir ai-scan ./my_project --backend ollama --model codellama:7b
+
+# Check health score only
+sir health ./my_project
+
+# Compare two versions of a codebase
+sir diff ./v1 ./v2
+
+# CI/CD — exit code 1 if duplicates found
+sir scan ./src --strict
+```
+
+### VS Code Extension
+
+1. Download [sir-engine-0.0.2.vsix](https://github.com/lflin00/SIR-ENGINE/raw/main/sir-engine-0.0.2.vsix)
+2. Open VS Code → Extensions → `...` menu → **Install from VSIX**
+3. Select the downloaded file
+4. Open any Python or JavaScript project and run **SIR: Scan Workspace** from the command palette
+
+### AI Setup (for cross-language detection)
+
+**Option 1 — Ollama (free, local):**
+```bash
+# Install Ollama from https://ollama.ai
 ollama pull codellama:7b
-streamlit run sir_ui.py
+# Then select "Ollama" as backend in the web app sidebar
 ```
 
-Open http://localhost:8501 — AI translation runs locally for free. Your code never leaves your machine.
+**Option 2 — Claude API:**
+Get an API key from [console.anthropic.com](https://console.anthropic.com) and enter it in the web app sidebar.
 
 ---
 
-## VS Code Extension
+## CLI Reference
 
-Download [sir-engine-0.0.2.vsix](https://github.com/lflin00/SRI-ENGINE/raw/main/sir-engine-0.0.2.vsix)
+```
+sir scan <path> [--min N] [--output file.json] [--strict] [--no-recurse]
+sir ai-scan <path> [--backend ollama|anthropic] [--model MODEL]
+sir health <path>
+sir diff <path1> <path2>
+```
 
-Install: `Cmd+Shift+P` → `Install from VSIX` → select the file
-
-- Scans on every save
-- Health score in status bar
-- Auto-merge with before/after diff preview
-- Fully reversible with Cmd+Z
+| Flag | Description |
+|---|---|
+| `--min N` | Minimum cluster size to report (default: 2) |
+| `--output FILE` | Save full report as JSON |
+| `--strict` | Exit with code 1 if any duplicates found (for CI/CD) |
+| `--no-recurse` | Don't scan subdirectories |
 
 ---
 
-## Health Score
+## Pack Format
+
+SIR Engine can export semantic fingerprints of entire codebases as portable `.sir.json` files. This lets you:
+
+- Compare two codebases without sharing source code
+- Store a semantic snapshot of your codebase at a point in time
+- Merge fingerprints from multiple codebases into a unified index
+
+Use the **Pack** tab in the web app to create and manage bundles.
+
+---
+
+## Architecture
 
 ```
-Health = (unique structures / total functions) × 100
+Source code (any language)
+        │
+        ▼
+  AI Translation          ← Ollama / Claude API (for non-Python/JS)
+        │
+        ▼
+  Python AST parse
+        │
+        ▼
+  AlphaRenamer            ← strips variable names, function names
+        │
+        ▼
+  SHA-256(ast.dump())     ← deterministic structural hash
+        │
+        ▼
+  Hash comparison         ← same hash = same logic
 ```
-
-100 = no duplicate logic anywhere. Lower = more redundant code.
 
 ---
 
 ## License
 
-Business Source License 1.1 — free for individuals, students, researchers, and internal business use. Commercial hosting requires a license.
-
-Converts to MIT on February 27, 2030.
+Business Source License (BSL). Free for personal and open-source use. Contact for commercial licensing.
 
 ---
 
-*Built by Lucas Flinders · Biomedical Engineering student · 2026*
+## Contributing
+
+Open an issue on the [Issues tab](https://github.com/lflin00/SIR-ENGINE/issues) — bug reports, feedback, and feature requests welcome.
+
+Built by [Lucas Flinders](https://github.com/lflin00) — biomedical engineering student at Ohio State.
