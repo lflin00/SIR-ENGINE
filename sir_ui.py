@@ -2767,6 +2767,62 @@ Shows health score in the status bar. Auto-merge with before/after diff preview 
         st.caption("Install: open VS Code → Cmd+Shift+P → Install from VSIX → select the file.")
 
     st.divider()
+    st.markdown("### MCP Server (Claude Code / Cursor)")
+    st.markdown("""
+SIR Engine ships with an **MCP (Model Context Protocol) server** — `sir_mcp.py` — that lets AI coding assistants
+like **Claude Code** and **Cursor** call SIR as a live tool during code generation. Before writing a new function,
+the AI can check whether equivalent logic already exists in your codebase.
+
+**Tools exposed over MCP:**
+
+| Tool | What it does |
+|------|-------------|
+| `sir_scan_codebase` | Index a project — build the semantic hash database |
+| `sir_check_function` | Check if a function already exists semantically before writing it |
+| `sir_check_class` | Check if a class already exists semantically |
+| `sir_duplicates` | List all duplicate clusters with file and line details |
+| `sir_health` | Get the health score for a codebase |
+| `sir_merge_preview` | Preview what a merge would do (no file writes) |
+| `sir_merge_apply` | Apply a merge after confirmation |
+
+**Setup — Claude Code**
+
+1. Clone the repo and note the path to `SIR_MAIN/sir_mcp.py`
+2. Add the following to your Claude Code MCP config (`~/.claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "sir-engine": {
+      "command": "python3",
+      "args": ["/path/to/SIR_MAIN/sir_mcp.py", "--path", "/path/to/your/project"]
+    }
+  }
+}
+```
+
+3. Restart Claude Code — the SIR tools will appear automatically.
+
+**Setup — Cursor / other MCP clients**
+
+Use the same JSON config block above. Cursor reads MCP servers from `.cursor/mcp.json` in your project root
+or from global settings. Point `--path` at the project you want to scan.
+
+**How it works in practice**
+
+Once connected, your AI assistant will:
+- Run `sir_scan_codebase` at the start of a session to index your project
+- Call `sir_check_function` before writing any new function
+- Warn you if semantically identical logic already exists — even under a different name
+
+This prevents duplicate logic from entering the codebase in the first place.
+""")
+    st.link_button(
+        "📦 View sir_mcp.py on GitHub",
+        "https://github.com/lflin00/SRI-ENGINE/blob/main/SIR_MAIN/sir_mcp.py"
+    )
+
+    st.divider()
     st.markdown("### Language support")
 
     lang_data = {
