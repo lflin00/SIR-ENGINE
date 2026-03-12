@@ -598,6 +598,11 @@ def extract_raw_classes(src: str, language: str) -> List[Tuple[str, int, str]]:
         pattern = CLASS_PATTERNS[lang_key]
         for match in re.finditer(pattern, src, re.MULTILINE):
             name = match.group(1)
+            # Skip matches inside line comments
+            match_line = src[:match.start()].count('\n')
+            line_stripped = lines[match_line].lstrip() if match_line < len(lines) else ""
+            if line_stripped.startswith('//') or line_stripped.startswith('*') or line_stripped.startswith('#'):
+                continue
             brace_pos = src.find('{', match.start())
             if brace_pos == -1:
                 continue
