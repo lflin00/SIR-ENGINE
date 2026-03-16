@@ -1,7 +1,3 @@
 {
-  "version": 2,
-  "routes": [
-    { "src": "/validate",     "dest": "/api/validate.py" },
-    { "src": "/api/validate", "dest": "/api/validate.py" }
-  ]
+  "version": 2
 }
