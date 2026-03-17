@@ -246,7 +246,7 @@ Source code (any language)
 |---|---|
 | Personal projects | Free |
 | Education / academic research | Free |
-| Open source projects | Free |
+| Non-commercial open source projects | Free |
 | Company internal use | **Requires commercial license** |
 | Scanning production code | **Requires commercial license** |
 | SaaS / hosted offering | **Requires commercial license** |
