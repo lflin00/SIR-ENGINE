@@ -11,3 +11,4 @@ bench/global_*
 restored_*/
 *.sir.json
 *_backup.py
+CLAUDE.md
