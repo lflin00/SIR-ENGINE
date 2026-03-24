@@ -5,7 +5,7 @@
 A Java function and a Python function that do the same thing produce the same hash. SIR Engine finds those matches, shows you exactly where the duplicates are, and lets you merge them out of your codebase in one click.
 
 🌐 **Landing page:** [sir-engine.com](https://sir-engine.com)  
-📦 **Web app:** [Live demo](https://sri-engine-7amwtce7a23k7q34cpnxem.streamlit.app)  
+📦 **Web app:** [app.sir-engine.com](https://app.sir-engine.com)  
 🔌 **VS Code extension:** [Download .vsix](https://github.com/lflin00/SIR-ENGINE/raw/main/sir-engine-0.0.2.vsix)
 
 ---
@@ -44,14 +44,14 @@ This is based on **alpha equivalence** — a concept from mathematics — applie
 
 **Native** (no AI needed): Python, JavaScript, TypeScript
 
-**AI-powered** (via Ollama or Claude API): Java, Rust, Go, C, C++, C#, Swift, Kotlin, Scala, Ruby, PHP, Haskell, Elixir, Lua, Dart, Julia, R, Nim, Zig, and more.
+**AI-powered** (via Ollama or Claude API): Java, Rust, Go, C, C++, C#, Swift, Kotlin, Scala, Ruby, PHP, Haskell, Elixir, Dart, Julia, R, Nim, Zig, and more.
 
 ---
 
 ## Quick Start
 
 ### Web App
-Go to the [live demo](https://sri-engine-7amwtce7a23k7q34cpnxem.streamlit.app) — no install needed.
+Go to [app.sir-engine.com](https://app.sir-engine.com) — no install needed.
 
 ### CLI Tool
 
