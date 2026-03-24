@@ -9,6 +9,7 @@ import ast
 import io
 import json
 import os
+import re
 import zipfile
 from collections import defaultdict
 from dataclasses import dataclass
@@ -102,6 +103,46 @@ def occurrence_filename(r: Dict[str, Any], idx: int) -> str:
 
 def count_lines(src: str) -> int:
     return len([l for l in src.splitlines() if l.strip()])
+
+
+def rename_calls_with_comment(src: str, dup_name: str, canon_name: str, timestamp: str) -> str:
+    """Rename call sites of dup_name → canon_name and append a SIR comment on each changed line."""
+    pattern = re.compile(rf'\b{re.escape(dup_name)}\s*\(')
+    comment = f"  # SIR: was {dup_name}() — merged {timestamp}"
+    lines = src.splitlines()
+    result = []
+    for line in lines:
+        if pattern.search(line):
+            line = pattern.sub(f'{canon_name}(', line)
+            line = line.rstrip() + comment
+        result.append(line)
+    return '\n'.join(result)
+
+
+def update_test_file(src: str, dup_name: str, canon_name: str, canon_module: str, timestamp: str) -> str:
+    """Update a test file: rename import lines and call sites for a removed duplicate."""
+    canonical_import = f"from {canon_module} import {canon_name}"
+    already_imported = canonical_import in src
+    call_pattern = re.compile(rf'\b{re.escape(dup_name)}\s*\(')
+    import_pattern = re.compile(
+        rf'^(\s*from\s+\S+\s+import\s+(?:.*,\s*)?){re.escape(dup_name)}(\s*(?:,.*|#.*)?$)'
+    )
+    lines = src.splitlines()
+    result = []
+    for line in lines:
+        m = import_pattern.match(line)
+        if m:
+            if already_imported:
+                # Canonical already imported — replace duplicate import with a comment only
+                line = f"# SIR: {dup_name} merged into {canon_name} (from {canon_module}) — {timestamp}"
+            else:
+                line = f"{canonical_import}  # SIR: was {dup_name} — merged {timestamp}"
+                already_imported = True
+        elif call_pattern.search(line):
+            line = call_pattern.sub(f'{canon_name}(', line)
+            line = line.rstrip() + f"  # SIR: was {dup_name}() — merged {timestamp}"
+        result.append(line)
+    return '\n'.join(result)
 
 
 def build_merge_report(
@@ -319,7 +360,7 @@ st.title("SIR Engine")
 st.caption("Semantic duplicate detection for Python, JavaScript, TypeScript, and 25+ languages via AI translation.")
 
 tab_scan, tab_class_scan, tab_github, tab_pack, tab_unpack, tab_verify, tab_diff, tab_merge, tab_about = st.tabs([
-    "Scan", "Class Scan", "GitHub Scanner", "Pack", "Unpack", "Verify", "Diff", "Merge", "About"
+    "Scan", "Class Scan", "GitHub Scanner", "Pack", "Unpack", "Verify", "Compare", "Merge", "About"
 ])
 
 
@@ -340,11 +381,14 @@ with tab_scan:
     if scan_lang == "Python (.py)":
         st.write("Upload `.py` files — SIR finds functions that are logically identical even if they have different names or variable names.")
         uploaded = st.file_uploader("Upload Python files", type=["py"], accept_multiple_files=True, key="scan_upload")
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             include_methods = st.checkbox("Include class methods", value=False)
         with col2:
             min_cluster = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1)
+        with col3:
+            min_lines = st.number_input("Min function lines (0 = off)", min_value=0, max_value=200, value=0, step=1,
+                                        help="Skip functions shorter than this many non-blank lines. Filters out trivial 1–2 line matches.")
         sir_ignore_input = st.text_area(
             ".sir_ignore — function names to skip (one per line)",
             placeholder="calculate_total\nadd_values\n# Use # for comments",
@@ -375,6 +419,8 @@ with tab_scan:
                         # Check sir_ignore
                         short_name = qualname.split(".")[-1]
                         if short_name in ignored_funcs or qualname in ignored_funcs:
+                            continue
+                        if min_lines > 0 and count_lines(code) < int(min_lines):
                             continue
                         total_funcs += 1
                         func_code_map[f"{f.name}::{qualname}"] = code
@@ -452,24 +498,36 @@ with tab_scan:
             import ast as _ast, zipfile, io
             st.divider()
             st.markdown("### 🔀 Merge Duplicates")
+
+            # Optional test file upload
+            with st.expander("Upload test files (optional — call sites will be updated to match merge)", expanded=False):
+                st.caption("Upload your pytest/unittest files. SIR will rename calls and update imports in test files to match the merge, so you can run your test suite post-merge as a correctness check.")
+                _test_uploaded = st.file_uploader(
+                    "Test files (.py)", type=["py"],
+                    accept_multiple_files=True, key="merge_test_upload"
+                )
+                if _test_uploaded:
+                    st.session_state["merge_test_sources"] = {
+                        f.name: f.read().decode("utf-8", errors="replace") for f in _test_uploaded
+                    }
+                    st.success(f"{len(_test_uploaded)} test file(s) loaded — will be updated on merge.")
+
             merge_col1, merge_col2 = st.columns([1, 3])
             with merge_col1:
                 if st.button("⚡ Auto merge all", type="primary", key="auto_merge_py"):
                     modified = {fname: src for fname, src in _scan_sources.items()}
                     removed_count = 0
-                    # Collect all removals per file, then sort by line number descending
-                    # so removing from bottom up keeps line numbers stable
+                    _func_code_map = st.session_state.get("scan_func_code_map", {})
+
+                    # Step 1: remove duplicate function bodies (bottom-up per file)
                     removals_by_file = {}
                     for h, occs in _dupes.items():
                         for occ in occs[1:]:
                             fname = occ.file
-                            if fname not in removals_by_file:
-                                removals_by_file[fname] = []
-                            removals_by_file[fname].append(occ)
+                            removals_by_file.setdefault(fname, []).append(occ)
                     for fname, occ_list in removals_by_file.items():
                         if fname not in modified:
                             continue
-                        # Sort by lineno descending so we remove from bottom first
                         occ_list.sort(key=lambda o: o.lineno, reverse=True)
                         for occ in occ_list:
                             try:
@@ -485,18 +543,71 @@ with tab_scan:
                                         break
                             except Exception:
                                 pass
+
+                    # Step 2: rename call sites and add imports for removed duplicates
+                    _merge_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    utils_functions = {}  # canon_name -> source code
+                    for h, occs in _dupes.items():
+                        canon_occ = occs[0]
+                        canon_name = canon_occ.qualname.split(".")[-1]
+                        canon_module = canon_occ.file[:-3] if canon_occ.file.endswith(".py") else canon_occ.file
+                        code_key = f"{canon_occ.file}::{canon_occ.qualname}"
+                        if code_key in _func_code_map:
+                            utils_functions[canon_name] = _func_code_map[code_key]
+                        for occ in occs[1:]:
+                            dup_name = occ.qualname.split(".")[-1]
+                            fname = occ.file
+                            if fname not in modified:
+                                continue
+                            src = modified[fname]
+                            if dup_name != canon_name:
+                                src = rename_calls_with_comment(src, dup_name, canon_name, _merge_ts)
+                            import_line = f"from {canon_module} import {canon_name}"
+                            if (import_line not in src
+                                    and f"def {canon_name}" not in src):
+                                src = import_line + "\n" + src
+                            modified[fname] = src
+
+                    # Step 3: build utils.py with all canonical function sources
+                    utils_py = "# utils.py — canonical functions extracted by SIR Engine\n\n"
+                    for name, code in utils_functions.items():
+                        utils_py += code + "\n\n"
+
+                    # Step 4: update test files — rename calls + update imports, no removal
+                    _test_sources = st.session_state.get("merge_test_sources", {})
+                    updated_tests = {}
+                    for tfname, tsrc in _test_sources.items():
+                        for h, occs in _dupes.items():
+                            canon_occ = occs[0]
+                            canon_name = canon_occ.qualname.split(".")[-1]
+                            canon_module = canon_occ.file[:-3] if canon_occ.file.endswith(".py") else canon_occ.file
+                            for occ in occs[1:]:
+                                dup_name = occ.qualname.split(".")[-1]
+                                if dup_name != canon_name:
+                                    tsrc = update_test_file(tsrc, dup_name, canon_name, canon_module, _merge_ts)
+                        updated_tests[tfname] = tsrc
+
                     zip_buf = io.BytesIO()
                     with zipfile.ZipFile(zip_buf, "w") as zf:
                         for fname, src in modified.items():
                             zf.writestr(fname, src)
+                        if utils_functions:
+                            zf.writestr("utils.py", utils_py)
+                        for tfname, tsrc in updated_tests.items():
+                            zf.writestr(f"tests/{tfname}", tsrc)
                     zip_buf.seek(0)
                     st.session_state["auto_merge_zip"] = zip_buf.getvalue()
                     st.session_state["auto_merge_count"] = removed_count
+                    st.session_state["auto_merge_test_count"] = len(updated_tests)
             with merge_col2:
                 st.caption("Keeps the first occurrence of each duplicate and removes all others.")
 
             if "auto_merge_zip" in st.session_state:
-                st.success(f"Auto merge complete — removed {st.session_state['auto_merge_count']} duplicate function(s).")
+                _tc = st.session_state.get("auto_merge_test_count", 0)
+                _test_note = f" {_tc} test file(s) updated." if _tc else ""
+                st.success(f"Auto merge complete — removed {st.session_state['auto_merge_count']} duplicate function(s).{_test_note}")
+                if _tc:
+                    st.info("Run `pytest tests/` on the downloaded zip to verify the merge didn't change behaviour.")
                 st.download_button(
                     "📥 Download merged files",
                     data=st.session_state["auto_merge_zip"],
@@ -515,7 +626,10 @@ with tab_scan:
                         kept = occs[keep_idx]
                         to_remove = [o for i, o in enumerate(occs) if i != keep_idx]
                         modified = {fname: src for fname, src in _scan_sources.items()}
+                        _func_code_map = st.session_state.get("scan_func_code_map", {})
                         removed = 0
+
+                        # Step 1: remove duplicate function bodies (bottom-up)
                         to_remove.sort(key=lambda o: o.lineno, reverse=True)
                         for occ in to_remove:
                             fname = occ.file
@@ -534,16 +648,59 @@ with tab_scan:
                                         break
                             except Exception:
                                 pass
+
+                        # Step 2: rename call sites and add imports
+                        _merge_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        canon_name = kept.qualname.split(".")[-1]
+                        canon_module = kept.file[:-3] if kept.file.endswith(".py") else kept.file
+                        for occ in to_remove:
+                            dup_name = occ.qualname.split(".")[-1]
+                            fname = occ.file
+                            if fname not in modified:
+                                continue
+                            src = modified[fname]
+                            if dup_name != canon_name:
+                                src = rename_calls_with_comment(src, dup_name, canon_name, _merge_ts)
+                            import_line = f"from {canon_module} import {canon_name}"
+                            if (import_line not in src
+                                    and f"def {canon_name}" not in src):
+                                src = import_line + "\n" + src
+                            modified[fname] = src
+
+                        # Step 3: utils.py with the kept canonical function
+                        code_key = f"{kept.file}::{kept.qualname}"
+                        canon_src = _func_code_map.get(code_key, "")
+                        utils_py = f"# utils.py — canonical functions extracted by SIR Engine\n\n{canon_src}\n"
+
+                        # Step 4: update test files
+                        _test_sources = st.session_state.get("merge_test_sources", {})
+                        updated_tests = {}
+                        for tfname, tsrc in _test_sources.items():
+                            for occ in to_remove:
+                                dup_name = occ.qualname.split(".")[-1]
+                                if dup_name != canon_name:
+                                    tsrc = update_test_file(tsrc, dup_name, canon_name, canon_module, _merge_ts)
+                            updated_tests[tfname] = tsrc
+
                         zip_buf = io.BytesIO()
                         with zipfile.ZipFile(zip_buf, "w") as zf:
                             for fname, src in modified.items():
                                 zf.writestr(fname, src)
+                            if canon_src:
+                                zf.writestr("utils.py", utils_py)
+                            for tfname, tsrc in updated_tests.items():
+                                zf.writestr(f"tests/{tfname}", tsrc)
                         zip_buf.seek(0)
                         st.session_state[f"manual_zip_{h}"] = zip_buf.getvalue()
                         st.session_state[f"manual_kept_{h}"] = kept.qualname
                         st.session_state[f"manual_removed_{h}"] = removed
+                        st.session_state[f"manual_test_count_{h}"] = len(updated_tests)
                     if f"manual_zip_{h}" in st.session_state:
-                        st.success(f"Kept `{st.session_state[f'manual_kept_{h}']}` — removed {st.session_state[f'manual_removed_{h}']} duplicate(s).")
+                        _mtc = st.session_state.get(f"manual_test_count_{h}", 0)
+                        _mtn = f" {_mtc} test file(s) updated." if _mtc else ""
+                        st.success(f"Kept `{st.session_state[f'manual_kept_{h}']}` — removed {st.session_state[f'manual_removed_{h}']} duplicate(s).{_mtn}")
+                        if _mtc:
+                            st.info("Run `pytest tests/` on the downloaded zip to verify the merge didn't change behaviour.")
                         st.download_button(
                             "📥 Download merged files",
                             data=st.session_state[f"manual_zip_{h}"],
@@ -565,7 +722,12 @@ with tab_scan:
             st.error("sir_js.py not found.")
         else:
             js_uploaded = st.file_uploader("Upload JavaScript files", type=["js", "jsx"], accept_multiple_files=True, key="scan_js_upload")
-            js_min = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1, key="scan_js_min")
+            _jscol1, _jscol2 = st.columns(2)
+            with _jscol1:
+                js_min = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1, key="scan_js_min")
+            with _jscol2:
+                js_min_lines = st.number_input("Min function lines (0 = off)", min_value=0, max_value=200, value=0, step=1, key="scan_js_min_lines",
+                                               help="Skip functions shorter than this many non-blank lines.")
 
             if st.button("Run JS scan", type="primary"):
                 if not js_uploaded:
@@ -580,6 +742,8 @@ with tab_scan:
                         src = f.read().decode("utf-8", errors="replace")
                         funcs = extract_js_functions(src, f.name)
                         for name, lineno, params, body_src in funcs:
+                            if js_min_lines > 0 and count_lines(body_src) < int(js_min_lines):
+                                continue
                             total_js += 1
                             body_tokens = js_tokenize(body_src)
                             sir = canonicalize_js(params, body_tokens)
@@ -622,7 +786,12 @@ with tab_scan:
             st.error("sir_js.py not found.")
         else:
             ts_uploaded = st.file_uploader("Upload TypeScript files", type=["ts", "tsx"], accept_multiple_files=True, key="scan_ts_upload")
-            ts_min = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1, key="scan_ts_min")
+            _tscol1, _tscol2 = st.columns(2)
+            with _tscol1:
+                ts_min = st.number_input("Min duplicates to show", min_value=2, max_value=50, value=2, step=1, key="scan_ts_min")
+            with _tscol2:
+                ts_min_lines = st.number_input("Min function lines (0 = off)", min_value=0, max_value=200, value=0, step=1, key="scan_ts_min_lines",
+                                               help="Skip functions shorter than this many non-blank lines.")
 
             if st.button("Run TS scan", type="primary"):
                 if not ts_uploaded:
@@ -637,6 +806,8 @@ with tab_scan:
                         src = f.read().decode("utf-8", errors="replace")
                         funcs = extract_js_functions(src, f.name)
                         for name, lineno, params, body_src in funcs:
+                            if ts_min_lines > 0 and count_lines(body_src) < int(ts_min_lines):
+                                continue
                             total_ts += 1
                             body_tokens = js_tokenize(body_src)
                             sir = canonicalize_js(params, body_tokens)
@@ -991,7 +1162,7 @@ with tab_class_scan:
                 if not all_classes:
                     st.info("No classes with methods found in the uploaded files.")
                 else:
-                    exact_clusters, similar_pairs = _scan_for_class_dupes(
+                    exact_clusters, similar_pairs, unresolved_bases = _scan_for_class_dupes(
                         all_classes,
                         min_similarity=cs_min_sim,
                         apply_inheritance=cs_inheritance,
@@ -1013,6 +1184,14 @@ with tab_class_scan:
                         st.caption(f"{ai_translated_count} class(es) processed via AI translation.")
                     if errors_ai_cls:
                         st.caption(f"{errors_ai_cls} class(es) could not be translated.")
+                    if cs_inheritance and unresolved_bases:
+                        sorted_bases = sorted(unresolved_bases)
+                        st.info(
+                            f"**Inheritance note:** {len(unresolved_bases)} base class(es) not found in this batch — "
+                            f"hashed by name so children of different unresolved parents still compare correctly. "
+                            f"Upload parent class files to enable full inheritance hashing.\n\n"
+                            f"Stub-hashed: `{'`, `'.join(sorted_bases)}`"
+                        )
 
                     # ── Hash table ──
                     with st.expander("Class hash table", expanded=False):
@@ -1364,12 +1543,18 @@ with tab_github:
 # ─────────────────────────────────────────────
 
 with tab_pack:
-    st.subheader("Pack: compress files into a SIR bundle")
+    st.subheader("Pack: create a shareable codebase fingerprint")
+    st.info(
+        "**The bundle contains only structural hashes — no source code.** "
+        "You can share it with any party to prove or disprove code overlap "
+        "without exposing a single line of your implementation. "
+        "SHA-256 hashes are one-way: the original source cannot be reconstructed from a bundle."
+    )
 
     pack_lang = st.selectbox("Language", ["Python (.py)", "JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)", "Any Language (AI-powered 🤖)"], key="pack_lang")
 
     if pack_lang == "Python (.py)":
-        st.write("Upload `.py` files — SIR encodes each function into a structural node graph, deduplicates shared logic, and bundles everything into a single downloadable `bundle.json`.")
+        st.write("Upload your `.py` files — SIR fingerprints every function's logical structure and bundles the hashes into a `bundle.json` you can share safely.")
         pack_uploaded = st.file_uploader("Upload Python files to pack", type=["py"], accept_multiple_files=True, key="pack_upload")
         pack_methods = st.checkbox("Include class methods", value=False, key="pack_methods")
     elif pack_lang in ("JavaScript (.js / .jsx)", "TypeScript (.ts / .tsx)"):
@@ -2045,10 +2230,124 @@ with tab_verify:
 # ─────────────────────────────────────────────
 
 with tab_diff:
-    diff_lang = st.selectbox("Language", ["Python (.py)", "JavaScript / TypeScript", "Any Language (AI-powered 🤖)"], key="diff_lang")
+    st.subheader("Compare: find shared logic between two codebases")
+    st.write(
+        "Two parties can each pack their codebase locally and exchange only the bundle — "
+        "no source code is shared. Matching hashes prove identical logic."
+    )
+    diff_lang = st.selectbox("Language", ["Bundle vs Bundle (no source shared)", "Python (.py)", "JavaScript / TypeScript", "Any Language (AI-powered 🤖)"], key="diff_lang")
 
-    if diff_lang == "JavaScript / TypeScript":
-        st.subheader("Diff: structural diff between two JS/TS file sets")
+    if diff_lang == "Bundle vs Bundle (no source shared)":
+        st.write(
+            "Each party packs their codebase on their own machine and shares only the `bundle.json`. "
+            "Upload both bundles below — SIR identifies every function that exists in both codebases, "
+            "without either party ever seeing the other's source."
+        )
+
+        bvb_col1, bvb_col2 = st.columns(2)
+        with bvb_col1:
+            st.markdown("**Your bundle**")
+            bvb_a = st.file_uploader("Upload your bundle.json", type=["json"], key="bvb_a")
+        with bvb_col2:
+            st.markdown("**Their bundle**")
+            bvb_b = st.file_uploader("Upload their bundle.json", type=["json"], key="bvb_b")
+
+        if st.button("Compare bundles", type="primary"):
+            if not bvb_a or not bvb_b:
+                st.warning("Please upload both bundles.")
+            else:
+                def _parse_bundle(f) -> Dict[str, list]:
+                    """Return {hash: [{name, file}]} from any SIR bundle format."""
+                    data = json.loads(f.read().decode("utf-8"))
+                    index: Dict[str, list] = defaultdict(list)
+                    for r in data.get("roots", []):
+                        h = r.get("sir_sha256") or r.get("root")
+                        if not h:
+                            continue
+                        name = r.get("qualname") or r.get("name") or "unknown"
+                        index[h].append({"name": name, "file": r.get("file", "")})
+                    return index
+
+                idx_a = _parse_bundle(bvb_a)
+                idx_b = _parse_bundle(bvb_b)
+                set_a, set_b = set(idx_a), set(idx_b)
+                common = set_a & set_b
+                only_a = set_a - set_b
+                only_b = set_b - set_a
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Shared functions", len(common), help="Identical logic found in both codebases")
+                c2.metric("Only in yours", len(only_a))
+                c3.metric("Only in theirs", len(only_b))
+                st.divider()
+
+                if common:
+                    with st.expander(f"⚠️ {len(common)} function(s) with identical logic in both codebases", expanded=True):
+                        st.caption("These functions produce the same structural hash — the logic is provably identical.")
+                        for h in sorted(common):
+                            a_names = ", ".join(f"`{e['name']}`  ({e['file']})" for e in idx_a[h])
+                            b_names = ", ".join(f"`{e['name']}`  ({e['file']})" for e in idx_b[h])
+                            st.markdown(f"**Yours:** {a_names}  \n**Theirs:** {b_names}")
+                            st.caption(f"Hash: `{h}`")
+                            st.divider()
+                else:
+                    st.success("✅ No shared logic found — the two codebases are structurally distinct.")
+
+                if only_a:
+                    with st.expander(f"{len(only_a)} function(s) unique to your codebase", expanded=False):
+                        for h in sorted(only_a):
+                            for e in idx_a[h]:
+                                st.markdown(f"- `{e['name']}` ({e['file']})")
+
+                if only_b:
+                    with st.expander(f"{len(only_b)} function(s) unique to their codebase", expanded=False):
+                        for h in sorted(only_b):
+                            for e in idx_b[h]:
+                                st.markdown(f"- `{e['name']}` ({e['file']})")
+
+                # HTML report
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                shared_rows = "".join(
+                    f"<tr><td><code>{e['name']}</code> ({e['file']})</td>"
+                    f"<td><code>{', '.join(e2['name'] for e2 in idx_b[h])}</code> ({', '.join(e2['file'] for e2 in idx_b[h])})</td>"
+                    f"<td><code>{h[:24]}...</code></td></tr>"
+                    for h in sorted(common) for e in idx_a[h][:1]
+                )
+                report_html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>SIR Code Overlap Report</title>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0e1117;color:#e0e0e0;padding:32px}}
+h1{{color:#fff;border-bottom:2px solid #333;padding-bottom:12px}}
+.card{{background:#1c1f26;border-radius:8px;padding:20px 28px;display:inline-block;margin:8px;min-width:140px}}
+.num{{font-size:2rem;font-weight:bold;color:#fff}}
+.label{{color:#888;font-size:.85rem;margin-top:4px}}
+table{{width:100%;border-collapse:collapse;margin-top:16px}}
+th{{text-align:left;color:#888;font-size:.8rem;padding:8px;border-bottom:1px solid #333}}
+td{{padding:8px;border-bottom:1px solid #222;font-size:.85rem}}
+code{{background:#2a2d36;padding:2px 6px;border-radius:4px;font-size:.85rem}}
+.footer{{margin-top:40px;color:#555;font-size:.8rem;border-top:1px solid #222;padding-top:16px}}
+</style></head><body>
+<h1>SIR Engine — Code Overlap Report</h1>
+<p style="color:#888">Generated {now}</p>
+<div>
+  <div class="card"><div class="num" style="color:{'#e74c3c' if common else '#2ecc71'}">{len(common)}</div><div class="label">Shared functions</div></div>
+  <div class="card"><div class="num">{len(only_a)}</div><div class="label">Unique to yours</div></div>
+  <div class="card"><div class="num">{len(only_b)}</div><div class="label">Unique to theirs</div></div>
+</div>
+{'<h2>Shared Logic (identical structural hash)</h2><table><tr><th>Your function</th><th>Their function</th><th>Hash</th></tr>' + shared_rows + '</table>' if common else '<p style="color:#2ecc71">No shared logic detected.</p>'}
+<div class="footer">
+  Generated by SIR Engine. Hashes are SHA-256 of alpha-renamed ASTs — source code is never included in bundles.
+  A hash match proves logical equivalence, not necessarily copying. Consult legal counsel for interpretation.
+</div>
+</body></html>"""
+                st.download_button(
+                    "📥 Download overlap report (.html)",
+                    data=report_html,
+                    file_name="sir_overlap_report.html",
+                    mime="text/html",
+                )
+
+    elif diff_lang == "JavaScript / TypeScript":
         st.write("Upload two sets of JS/TS files. SIR finds shared logic, additions, and removals by structural hash.")
         diff_js_a = st.file_uploader("Upload Set A (JS/TS)", type=["js","jsx","ts","tsx"], accept_multiple_files=True, key="diff_js_a")
         diff_js_b = st.file_uploader("Upload Set B (JS/TS)", type=["js","jsx","ts","tsx"], accept_multiple_files=True, key="diff_js_b")
@@ -2084,23 +2383,25 @@ with tab_diff:
                     health_b = int(100 * len(set_b) / max(total_b, 1))
 
                     c1, c2, c3, c4, c5 = st.columns(5)
-                    c1.metric("Shared structures", len(common))
-                    c2.metric("Only in A", len(only_a))
-                    c3.metric("Only in B", len(only_b))
-                    c4.metric("Health A", f"{health_a}/100")
-                    c5.metric("Health B", f"{health_b}/100")
+                    c1.metric("Shared functions", len(common))
+                    c2.metric("Only in yours", len(only_a))
+                    c3.metric("Only in theirs", len(only_b))
+                    c4.metric("Health (yours)", f"{health_a}/100")
+                    c5.metric("Health (theirs)", f"{health_b}/100")
                     st.divider()
 
                     if common:
-                        with st.expander(f"✅ {len(common)} shared structures", expanded=False):
+                        with st.expander(f"⚠️ {len(common)} shared structures — identical logic in both codebases", expanded=True):
                             for h in sorted(common):
-                                st.write(f"A: {', '.join(hashes_a[h])}  ↔  B: {', '.join(hashes_b[h])}")
+                                st.write(f"Yours: {', '.join(hashes_a[h])}  ↔  Theirs: {', '.join(hashes_b[h])}")
+                    else:
+                        st.success("✅ No shared logic found.")
                     if only_a:
-                        with st.expander(f"🔴 {len(only_a)} only in A (removed or not ported)", expanded=True):
+                        with st.expander(f"{len(only_a)} only in your codebase", expanded=False):
                             for h in sorted(only_a):
                                 st.write(f"• {', '.join(hashes_a[h])}")
                     if only_b:
-                        with st.expander(f"🟢 {len(only_b)} only in B (added or new)", expanded=True):
+                        with st.expander(f"{len(only_b)} only in their codebase", expanded=False):
                             for h in sorted(only_b):
                                 st.write(f"• {', '.join(hashes_b[h])}")
                 except Exception as e:
@@ -2182,16 +2483,15 @@ with tab_diff:
                         st.error(f"AI diff failed: {e}")
 
     else:
-        st.subheader("Diff: compare two sets of Python files structurally")
-        st.write("Upload files for **Set A** and **Set B**. SIR shows which logical structures are shared, unique to A, or unique to B.")
+        st.write("Upload two sets of Python files directly. SIR hashes every function in each set and shows what's shared, unique to yours, or unique to theirs.")
 
     col_a, col_b = st.columns(2)
     with col_a:
-        st.markdown("**Set A**")
-        files_a = st.file_uploader("Upload Set A", type=["py"], accept_multiple_files=True, key="diff_a")
+        st.markdown("**Your files**")
+        files_a = st.file_uploader("Upload your .py files", type=["py"], accept_multiple_files=True, key="diff_a")
     with col_b:
-        st.markdown("**Set B**")
-        files_b = st.file_uploader("Upload Set B", type=["py"], accept_multiple_files=True, key="diff_b")
+        st.markdown("**Their files**")
+        files_b = st.file_uploader("Upload their .py files", type=["py"], accept_multiple_files=True, key="diff_b")
 
     if st.button("Run diff", type="primary"):
         if not files_a or not files_b:
@@ -2220,21 +2520,23 @@ with tab_diff:
             only_b = sorted(set_b - set_a)
 
             c1, c2, c3 = st.columns(3)
-            c1.metric("Common structures", len(common))
-            c2.metric("Only in A", len(only_a))
-            c3.metric("Only in B", len(only_b))
+            c1.metric("Shared functions", len(common), help="Identical logic found in both codebases")
+            c2.metric("Only in yours", len(only_a))
+            c3.metric("Only in theirs", len(only_b))
             st.divider()
 
             if common:
-                with st.expander(f"✅ {len(common)} shared structure(s)", expanded=True):
+                with st.expander(f"⚠️ {len(common)} shared structure(s) — identical logic in both codebases", expanded=True):
                     for h in common:
-                        st.markdown(f"- `{h[:16]}...` → A: `{'`, `'.join(ha[h])}` | B: `{'`, `'.join(hb[h])}`")
+                        st.markdown(f"- `{h[:16]}...` → Yours: `{'`, `'.join(ha[h])}` | Theirs: `{'`, `'.join(hb[h])}`")
+            else:
+                st.success("✅ No shared logic found — the two codebases are structurally distinct.")
             if only_a:
-                with st.expander(f"🔵 {len(only_a)} only in Set A", expanded=True):
+                with st.expander(f"{len(only_a)} only in your codebase", expanded=False):
                     for h in only_a:
                         st.markdown(f"- `{h[:16]}...` → `{'`, `'.join(ha[h])}`")
             if only_b:
-                with st.expander(f"🟠 {len(only_b)} only in Set B", expanded=True):
+                with st.expander(f"{len(only_b)} only in their codebase", expanded=False):
                     for h in only_b:
                         st.markdown(f"- `{h[:16]}...` → `{'`, `'.join(hb[h])}`")
 
@@ -2252,6 +2554,7 @@ with tab_merge:
         st.warning("Always back up your code before merging. Review the output before using in production.")
         merge_js_uploaded = st.file_uploader("Upload JS/TS files", type=["js","jsx","ts","tsx"], accept_multiple_files=True, key="merge_js_upload")
         merge_js_min = st.number_input("Min duplicates to merge", min_value=2, max_value=50, value=2, step=1, key="merge_js_min")
+        merge_js_module = st.selectbox("Module system", ["ES Modules (import/export)", "CommonJS (require)"], key="merge_js_module")
 
         if st.button("Run JS/TS merge", type="primary"):
             if not merge_js_uploaded:
@@ -2285,6 +2588,7 @@ with tab_merge:
                         modified = dict(file_sources)
                         utils_functions = {}
                         changes = []
+                        use_esm = merge_js_module == "ES Modules (import/export)"
 
                         for h, occs in dupes.items():
                             canonical = occs[0]
@@ -2294,7 +2598,7 @@ with tab_merge:
 
                             for occ in occs:
                                 src = modified.get(occ["file"], "")
-                                pat = r"function\s+" + _re.escape(occ["name"]) + r"\s*\([^)]*\)\s*\{"
+                                pat = r"function\s+" + _re.escape(occ["name"]) + r"\s*\([^)]*\)\s*\{"
                                 m = _re.search(pat, src)
                                 if m:
                                     brace_start = src.index("{", m.start())
@@ -2307,16 +2611,23 @@ with tab_merge:
                                             if depth == 0: end = idx + 1; break
                                     src = src[:m.start()].rstrip() + "\n\n" + src[end:].lstrip()
                                 if occ["name"] != canon_name:
-                                    src = _re.sub(r"" + _re.escape(occ["name"]) + r"\s*\(", canon_name + "(", src)
-                                import_line = f"import {{ {canon_name} }} from './utils.js';"
+                                    src = _re.sub(_re.escape(occ["name"]) + r"\s*\(", canon_name + "(", src)
+                                if use_esm:
+                                    import_line = f"import {{ {canon_name} }} from './utils.js';"
+                                else:
+                                    import_line = f"const {{ {canon_name} }} = require('./utils');"
                                 if import_line not in src:
                                     src = import_line + "\n" + src
                                 modified[occ["file"]] = src
                                 changes.append({"file": occ["file"], "removed": occ["name"], "canonical": canon_name})
 
-                        utils_src = "// utils.js - canonical functions by SIR Engine\n\n"
-                        for name, src in utils_functions.items():
-                            utils_src += src + "\n\n"
+                        utils_src = "// utils.js \u2014 canonical functions by SIR Engine\n\n"
+                        for name, fn_src in utils_functions.items():
+                            fn_export = ("export " if use_esm else "") + fn_src
+                            utils_src += fn_export + "\n\n"
+                        if not use_esm:
+                            exports = ", ".join(utils_functions.keys())
+                            utils_src += f"module.exports = {{ {exports} }};\n"
 
                         health_before = int(100 * len(groups) / max(len(all_funcs), 1))
                         remaining = len(all_funcs) - sum(len(v)-1 for v in dupes.values())
@@ -2644,6 +2955,16 @@ with tab_merge:
             c2.metric("Duplicates removed", total_removed)
             c3.metric("Functions in utils.py", len(utils_functions))
             c4.metric("Lines saved", orig_lines - new_lines)
+
+            # Warn about files that have no remaining functions after merge
+            for fname, src in modified_sources.items():
+                if not extract_functions(src, fname, merge_methods):
+                    module = fname.replace(".py", "").replace("/", ".")
+                    st.warning(
+                        f"⚠️ `{fname}` has no remaining functions after merge. "
+                        f"Any `from {module} import ...` calls in other files will raise `ImportError`. "
+                        f"Consider deleting this file."
+                    )
 
             st.success(f"✅ Merged! A full HTML report is included in the zip as `sir_merge_report.html`.")
             st.download_button(

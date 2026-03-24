@@ -75,6 +75,45 @@ class _SelfAttrNormalizer(ast.NodeTransformer):
         return node
 
 
+def _node_with_load_ctx(node: ast.AST) -> ast.AST:
+    """Return a deep copy of an AST node with ctx set to Load (for use as a BinOp operand)."""
+    import copy
+    n = copy.deepcopy(node)
+    if hasattr(n, "ctx"):
+        n.ctx = ast.Load()
+    # Also fix nested ctx (e.g. self.x has both Name and Attribute with ctx)
+    for child in ast.walk(n):
+        if hasattr(child, "ctx"):
+            child.ctx = ast.Load()
+    return n
+
+
+class _AugAssignNormalizer(ast.NodeTransformer):
+    """
+    Normalize augmented assignments to their expanded form before hashing.
+    e.g.  x += y  →  x = x + y
+    This ensures LLM-translated code (which often emits +=) hashes identically
+    to source that was written with explicit expansion.
+    """
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> ast.AST:
+        self.generic_visit(node)
+        # x += y  →  x = x + y
+        # The BinOp left must have Load context; the Assign target keeps Store.
+        new_value = ast.BinOp(
+            left=ast.copy_location(_node_with_load_ctx(node.target), node.target),
+            op=type(node.op)(),
+            right=node.value,
+        )
+        return ast.copy_location(
+            ast.Assign(
+                targets=[node.target],
+                value=new_value,
+            ),
+            node,
+        )
+
+
 def _hash_method_src(method_src: str) -> str:
     """
     Hash a single method using alpha-equivalence + self-attribute normalization.
@@ -86,6 +125,11 @@ def _hash_method_src(method_src: str) -> str:
     # Step 1: normalize self.attr names
     normalizer = _SelfAttrNormalizer()
     tree = normalizer.visit(tree)
+    ast.fix_missing_locations(tree)
+
+    # Step 1b: normalize augmented assignments (x += y → x = x + y)
+    aug_normalizer = _AugAssignNormalizer()
+    tree = aug_normalizer.visit(tree)
     ast.fix_missing_locations(tree)
 
     # Step 2: alpha-rename args and locals
@@ -222,31 +266,43 @@ def _merkle_class_hash(methods: List[MethodInfo]) -> str:
 #  Merkle inheritance hash
 # ─────────────────────────────────────────────
 
-def apply_inheritance_hashes(classes: List[ClassInfo]) -> None:
+def _stub_base_hash(base_name: str) -> str:
     """
-    For each class that has a parent in the same scan,
-    fold the parent's class_hash into the child's hash (Merkle style).
+    Deterministic hash for a base class not present in the scan batch.
+    Uses the base name only — so two children of 'APIView' get the same
+    stub hash, but children of 'APIView' vs 'ViewSet' differ.
+    """
+    return hashlib.sha256(f"__stub_base__:{base_name}".encode()).hexdigest()
 
-    This means two classes that inherit from logically identical parents
-    and have identical methods will produce the same final hash.
 
-    Mutates ClassInfo.class_hash in place for classes with known parents.
-    Stores the parent hash in ClassInfo.parent_hash for display.
+def apply_inheritance_hashes(classes: List[ClassInfo]) -> set:
+    """
+    For each class with base classes, fold parent hashes into the child's
+    Merkle hash. Parents present in the scan batch use their real class hash.
+    Parents NOT in the batch are stub-hashed by name — deterministic and
+    consistent, so two children of the same unresolved base still compare
+    correctly, while children of *different* unresolved bases are kept apart.
+
+    Mutates ClassInfo.class_hash in place.
+    Returns the set of base class names that were stub-hashed (not in batch).
     """
     hash_by_name: Dict[str, str] = {c.name: c.class_hash for c in classes}
+    unresolved: set = set()
 
     for cls in classes:
         if not cls.bases:
             continue
+
         parent_hashes = []
         for base in cls.bases:
             if base in hash_by_name:
                 parent_hashes.append(hash_by_name[base])
+            else:
+                # Option 3: stub-hash unresolved base by name
+                parent_hashes.append(_stub_base_hash(base))
+                unresolved.add(base)
 
-        if not parent_hashes:
-            continue
-
-        # Fold parent hash(es) into child hash — Merkle style
+        # Fold all parent hashes into child hash — Merkle style
         sorted_method_hashes = sorted(m.hash for m in cls.methods)
         sorted_parent_hashes = sorted(parent_hashes)
         combined = json.dumps(
@@ -258,6 +314,8 @@ def apply_inheritance_hashes(classes: List[ClassInfo]) -> None:
             json.dumps(sorted_parent_hashes, separators=(",", ":")).encode()
         ).hexdigest()
         cls.class_hash = hashlib.sha256(combined).hexdigest()
+
+    return unresolved
 
 
 # ─────────────────────────────────────────────
@@ -306,7 +364,7 @@ def scan_for_class_dupes(
     classes: List[ClassInfo],
     min_similarity: float = 1.0,
     apply_inheritance: bool = True,
-) -> Tuple[List[ClassDuplicateCluster], List[ClassSimilarityPair]]:
+) -> Tuple[List[ClassDuplicateCluster], List[ClassSimilarityPair], set]:
     """
     Scan a list of ClassInfo objects for duplicates.
 
@@ -315,15 +373,18 @@ def scan_for_class_dupes(
         min_similarity: 0.0-1.0. 1.0 = exact duplicates only (binary mode).
                         Lower values find partial duplicates.
         apply_inheritance: if True, fold parent class hashes into child hashes
-                           before comparing (Merkle inheritance)
+                           before comparing (Merkle inheritance). Base classes
+                           not present in the batch are stub-hashed by name.
 
     Returns:
         exact_dupes: list of ClassDuplicateCluster (classes with identical Merkle hash)
         similar_pairs: list of ClassSimilarityPair (classes above min_similarity threshold,
                        excluding exact duplicates if min_similarity < 1.0)
+        unresolved_bases: set of base class names stub-hashed (not found in batch)
     """
+    unresolved_bases: set = set()
     if apply_inheritance:
-        apply_inheritance_hashes(classes)
+        unresolved_bases = apply_inheritance_hashes(classes)
 
     # ── Exact duplicates (binary) ──
     groups: Dict[str, List[ClassInfo]] = defaultdict(list)
@@ -359,7 +420,7 @@ def scan_for_class_dupes(
 
         similar_pairs.sort(key=lambda p: -p.similarity)
 
-    return exact_clusters, similar_pairs
+    return exact_clusters, similar_pairs, unresolved_bases
 
 
 # ─────────────────────────────────────────────
@@ -375,7 +436,7 @@ def scan_files_for_classes(
     ai_ollama_model: str = "codellama:7b",
     ai_ollama_host: str = "http://localhost:11434",
     ai_use_cache: bool = True,
-) -> Tuple[List[ClassDuplicateCluster], List[ClassSimilarityPair], int]:
+) -> Tuple[List[ClassDuplicateCluster], List[ClassSimilarityPair], int, set]:
     """
     Scan multiple files for class-level duplicates.
 
@@ -393,7 +454,7 @@ def scan_files_for_classes(
         ai_use_cache:      use .sir_cache/ for translation caching
 
     Returns:
-        (exact_clusters, similar_pairs, total_classes_found)
+        (exact_clusters, similar_pairs, total_classes_found, unresolved_bases)
     """
     ai_kwargs = dict(
         backend=ai_backend,
@@ -414,12 +475,12 @@ def scan_files_for_classes(
                     extract_classes_ai(src, filename, language, **ai_kwargs)
                 )
 
-    exact, similar = scan_for_class_dupes(
+    exact, similar, unresolved_bases = scan_for_class_dupes(
         all_classes,
         min_similarity=min_similarity,
         apply_inheritance=apply_inheritance,
     )
-    return exact, similar, len(all_classes)
+    return exact, similar, len(all_classes), unresolved_bases
 
 
 # ─────────────────────────────────────────────

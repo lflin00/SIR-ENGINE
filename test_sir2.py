@@ -176,7 +176,7 @@ def test_exact_duplicate():
     classes_b = extract_classes(SRC_EXACT_B, "basket.py")
     all_classes = classes_a + classes_b
 
-    exact, _, total = scan_files_for_classes(
+    exact, _, total, _unresolved = scan_files_for_classes(
         {"cart.py": SRC_EXACT_A, "basket.py": SRC_EXACT_B},
         min_similarity=1.0
     )
@@ -195,7 +195,7 @@ def test_exact_duplicate():
 
 def test_partial_duplicate():
     print("\n=== TEST 2: Partial duplicate classes (similarity) ===")
-    exact, similar, total = scan_files_for_classes(
+    exact, similar, total, _unresolved = scan_files_for_classes(
         {"cart.py": SRC_EXACT_A, "inventory.py": SRC_PARTIAL},
         min_similarity=0.5
     )
@@ -219,7 +219,7 @@ def test_partial_duplicate():
 
 def test_unique_classes_dont_match():
     print("\n=== TEST 3: Unique classes don't match ===")
-    exact, similar, total = scan_files_for_classes(
+    exact, similar, total, _unresolved = scan_files_for_classes(
         {"cart.py": SRC_EXACT_A, "parser.py": SRC_UNIQUE},
         min_similarity=0.3
     )
@@ -235,7 +235,7 @@ def test_unique_classes_dont_match():
 
 def test_method_order_independence():
     print("\n=== TEST 4: Method order independence ===")
-    exact, _, total = scan_files_for_classes(
+    exact, _, total, _unresolved = scan_files_for_classes(
         {"calc.py": SRC_ORDER_A, "math.py": SRC_ORDER_B},
         min_similarity=1.0
     )
@@ -256,7 +256,7 @@ def test_inheritance_hashing():
     print("\n=== TEST 5: Inheritance Merkle hashing ===")
 
     # Dog and Cat inherit from Animal and have different methods — should NOT match
-    exact_animal, _, total = scan_files_for_classes(
+    exact_animal, _, total, _unresolved = scan_files_for_classes(
         {
             "animal.py": SRC_PARENT,
             "dog.py": SRC_CHILD_A,
@@ -271,7 +271,7 @@ def test_inheritance_hashing():
 
     # Dog inheriting Animal vs AndroidDog inheriting Robot — different parents
     # even though both have identical bark() methods — should NOT match
-    exact_robot, _, _ = scan_files_for_classes(
+    exact_robot, _, _, _unresolved2 = scan_files_for_classes(
         {
             "animal.py": SRC_PARENT,
             "dog.py": SRC_CHILD_A,
@@ -292,6 +292,55 @@ def test_inheritance_hashing():
     print(f"  Different parents → no match: {PASS if not dog_android_match else FAIL}")
 
     result = not dog_android_match
+    return result
+
+
+def test_stub_hash_unresolved_bases():
+    print("\n=== TEST 6: Stub-hash for unresolved base classes ===")
+
+    # Two classes inheriting from a framework base NOT in the scan batch.
+    # They should be kept apart from classes with NO parent or a different parent.
+    SRC_DJANGO_A = '''
+class OrderView(APIView):
+    def get(self):
+        return self.data
+'''
+    SRC_DJANGO_B = '''
+class ProductView(APIView):
+    def get(self):
+        return self.data
+'''
+    SRC_OTHER_BASE = '''
+class ReportView(ViewSet):
+    def get(self):
+        return self.data
+'''
+
+    # Test 6a: two children of same unresolved base with identical methods → match
+    exact_same, _, _, unresolved_same = scan_files_for_classes(
+        {"a.py": SRC_DJANGO_A, "b.py": SRC_DJANGO_B},
+        min_similarity=1.0,
+        apply_inheritance=True,
+    )
+    same_base_match = len(exact_same) == 1
+    print(f"  OrderView(APIView) == ProductView(APIView) [same unresolved base, same logic]: "
+          f"{PASS if same_base_match else FAIL}")
+    print(f"  Unresolved bases reported: {sorted(unresolved_same)}")
+    unresolved_reported = "APIView" in unresolved_same
+    print(f"  'APIView' in unresolved_bases: {PASS if unresolved_reported else FAIL}")
+
+    # Test 6b: children of different unresolved bases → no match even with same method logic
+    exact_diff, _, _, unresolved_diff = scan_files_for_classes(
+        {"a.py": SRC_DJANGO_A, "c.py": SRC_OTHER_BASE},
+        min_similarity=1.0,
+        apply_inheritance=True,
+    )
+    diff_base_no_match = len(exact_diff) == 0
+    print(f"  OrderView(APIView) != ReportView(ViewSet) [different unresolved bases]: "
+          f"{PASS if diff_base_no_match else FAIL}")
+    print(f"  Unresolved bases reported: {sorted(unresolved_diff)}")
+
+    result = same_base_match and unresolved_reported and diff_base_no_match
     return result
 
 
@@ -330,6 +379,7 @@ if __name__ == "__main__":
         test_unique_classes_dont_match(),
         test_method_order_independence(),
         test_inheritance_hashing(),
+        test_stub_hash_unresolved_bases(),
     ]
 
     passed = sum(results)

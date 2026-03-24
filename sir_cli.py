@@ -199,11 +199,11 @@ def _try_import_sir2():
         if (c / "sir2_core.py").exists():
             sys.path.insert(0, str(c))
             try:
-                from sir2_core import extract_classes, scan_for_class_dupes
-                return extract_classes, scan_for_class_dupes
+                from sir2_core import extract_classes, scan_for_class_dupes, scan_files_for_classes
+                return extract_classes, scan_for_class_dupes, scan_files_for_classes
             except ImportError:
                 pass
-    return None, None
+    return None, None, None
 
 
 def _try_import_sir_js():
@@ -539,8 +539,10 @@ def cmd_ai_scan(args: argparse.Namespace) -> int:
 # ─────────────────────────────────────────────
 
 def cmd_class_scan(args: argparse.Namespace) -> int:
-    """Scan Python files for class-level semantic duplicates using the V2 engine."""
-    extract_classes, scan_for_class_dupes = _try_import_sir2()
+    """Scan files for class-level semantic duplicates using the V2 engine.
+    Python files are processed natively. Java, Kotlin, Swift, C#, and other
+    OOP language files are translated to Python via AI before hashing."""
+    extract_classes, scan_for_class_dupes, scan_files_for_classes = _try_import_sir2()
     if not extract_classes:
         err("sir2_core.py not found. Make sure it's in the same directory.")
         return 1
@@ -552,12 +554,29 @@ def cmd_class_scan(args: argparse.Namespace) -> int:
 
     header(f"SIR Engine V2 — Class Scan  {root.name}/")
 
-    files = [root] if root.is_file() else discover_files(root, PY_EXTS, recursive=not args.no_recurse)
+    # Supported OOP class extensions (Python native + AI-translated)
+    CLASS_EXTS = PY_EXTS | {
+        ".java", ".kt", ".kts", ".swift", ".cs", ".scala",
+        ".dart", ".php", ".cpp", ".cc", ".cxx", ".h", ".hpp",
+        ".rs", ".go", ".rb",
+    }
+
+    files = [root] if root.is_file() else discover_files(root, CLASS_EXTS, recursive=not args.no_recurse)
     if not files:
-        warn("No Python files found.")
+        warn("No supported class files found.")
         return 0
 
-    info(f"Found {len(files)} Python file(s)")
+    api_key = getattr(args, "api_key", None) or os.environ.get("ANTHROPIC_API_KEY", "")
+    backend = getattr(args, "backend", "anthropic")
+    ollama_model = getattr(args, "model", "codellama:7b")
+    ollama_host = getattr(args, "host", "http://localhost:11434")
+
+    py_files = [f for f in files if f.suffix == ".py"]
+    ai_files = [f for f in files if f.suffix != ".py"]
+
+    info(f"Found {len(py_files)} Python file(s), {len(ai_files)} non-Python file(s)")
+    if ai_files:
+        info(f"AI backend: {backend} — translating {len(ai_files)} file(s) to Python for hashing")
 
     file_sources: Dict[str, str] = {}
     for f in files:
@@ -567,28 +586,32 @@ def cmd_class_scan(args: argparse.Namespace) -> int:
         except Exception:
             pass
 
-    all_classes = []
-    for fname, src in file_sources.items():
-        all_classes.extend(extract_classes(src, fname))
+    exact_clusters, similar_pairs, total_classes, unresolved_bases = scan_files_for_classes(
+        file_sources,
+        min_similarity=args.min_similarity,
+        apply_inheritance=not args.no_inheritance,
+        ai_backend=backend,
+        ai_api_key=api_key,
+        ai_ollama_model=ollama_model,
+        ai_ollama_host=ollama_host,
+        ai_use_cache=not getattr(args, "no_cache", False),
+    )
 
-    if not all_classes:
+    if total_classes == 0:
         warn("No classes with methods found.")
         return 0
 
-    info(f"Found {len(all_classes)} class(es) with methods")
+    info(f"Found {total_classes} class(es) with methods")
 
-    exact_clusters, similar_pairs = scan_for_class_dupes(
-        all_classes,
-        min_similarity=args.min_similarity,
-        apply_inheritance=not args.no_inheritance,
-    )
+    if unresolved_bases:
+        info(f"Unresolved base classes (stub-hashed by name): {', '.join(sorted(unresolved_bases))}")
 
     # Summary
     print()
     dup_count = sum(len(c.members) for c in exact_clusters)
-    health = compute_health(len(all_classes), dup_count)
+    health = compute_health(total_classes, dup_count)
     cols = [
-        ("Classes found",   str(len(all_classes))),
+        ("Classes found",   str(total_classes)),
         ("Exact clusters",  str(len(exact_clusters))),
         ("Similar pairs",   str(len(similar_pairs))),
         ("Health",          f"{health}/100"),
@@ -608,7 +631,8 @@ def cmd_class_scan(args: argparse.Namespace) -> int:
             print(f"  {_c('●', RED)}  {len(cluster.members)} copies  {_c(cluster.class_hash[:16] + '...', DIM)}")
             for cls in cluster.members:
                 methods = ", ".join(m.name for m in cls.methods)
-                print(f"     {_c(cls.name, CYAN)}  {_c(cls.file, BOLD)}  line {cls.lineno}")
+                lang = cls.original_language or "Python"
+                print(f"     {_c(cls.name, CYAN)}  {_c(cls.file, BOLD)}  {_c(f'[{lang}]', DIM)}  line {cls.lineno}")
                 print(f"       {_c('methods:', DIM)} {methods}")
     else:
         print()
@@ -620,10 +644,12 @@ def cmd_class_scan(args: argparse.Namespace) -> int:
         print(_c(f"  Similar class pairs ({len(similar_pairs)} found, >= {args.min_similarity:.0%}):", BOLD))
         for pair in similar_pairs:
             pct = f"{pair.similarity:.0%}"
+            lang_a = pair.class_a.original_language or "Python"
+            lang_b = pair.class_b.original_language or "Python"
             print()
             print(f"  {_c('◑', YELLOW)}  {pct} similar  —  "
-                  f"{_c(pair.class_a.name, CYAN)} ({pair.class_a.file})  vs  "
-                  f"{_c(pair.class_b.name, CYAN)} ({pair.class_b.file})")
+                  f"{_c(pair.class_a.name, CYAN)} ({pair.class_a.file} [{lang_a}])  vs  "
+                  f"{_c(pair.class_b.name, CYAN)} ({pair.class_b.file} [{lang_b}])")
             shared = [a.name for a, _ in pair.matching_methods]
             only_a = [m.name for m in pair.only_in_a]
             only_b = [m.name for m in pair.only_in_b]
@@ -638,7 +664,7 @@ def cmd_class_scan(args: argparse.Namespace) -> int:
     if args.output:
         report = {
             "scanned_path": str(root),
-            "total_classes": len(all_classes),
+            "total_classes": total_classes,
             "exact_clusters": len(exact_clusters),
             "similar_pairs": len(similar_pairs),
             "health_score": health,
@@ -647,6 +673,7 @@ def cmd_class_scan(args: argparse.Namespace) -> int:
                     "class_hash": c.class_hash,
                     "members": [
                         {"name": m.name, "file": m.file, "lineno": m.lineno,
+                         "language": m.original_language or "Python",
                          "methods": [mth.name for mth in m.methods]}
                         for m in c.members
                     ],
@@ -655,8 +682,10 @@ def cmd_class_scan(args: argparse.Namespace) -> int:
             ],
             "similar": [
                 {
-                    "class_a": {"name": p.class_a.name, "file": p.class_a.file},
-                    "class_b": {"name": p.class_b.name, "file": p.class_b.file},
+                    "class_a": {"name": p.class_a.name, "file": p.class_a.file,
+                                "language": p.class_a.original_language or "Python"},
+                    "class_b": {"name": p.class_b.name, "file": p.class_b.file,
+                                "language": p.class_b.original_language or "Python"},
                     "similarity": round(p.similarity, 4),
                     "shared_methods": [a.name for a, _ in p.matching_methods],
                     "only_in_a": [m.name for m in p.only_in_a],
@@ -673,6 +702,259 @@ def cmd_class_scan(args: argparse.Namespace) -> int:
         err(f"Strict mode: {len(exact_clusters)} exact cluster(s), {len(similar_pairs)} similar pair(s) found.")
         return 1
 
+    return 0
+
+
+# ─────────────────────────────────────────────
+#  semantic-scan command
+# ─────────────────────────────────────────────
+
+def cmd_semantic_scan(args: argparse.Namespace) -> int:
+    """Two-pass semantic duplicate scan.
+    Pass 1 (SIR): structural/alpha-equivalence — instant, free.
+    Pass 2 (AI):  semantic equivalence on what SIR missed — catches x+x vs x*2, etc.
+    """
+    try:
+        from sir_semantic import semantic_scan
+    except ImportError as e:
+        err(f"sir_semantic.py not found: {e}")
+        return 1
+
+    root = Path(args.path).expanduser().resolve()
+    if not root.exists():
+        err(f"Path not found: {root}")
+        return 1
+
+    header(f"SIR Engine — Semantic Scan  {root.name}/")
+
+    files = [root] if root.is_file() else discover_files(root, PY_EXTS, recursive=not args.no_recurse)
+    if not files:
+        warn("No Python files found.")
+        return 0
+
+    file_sources: Dict[str, str] = {}
+    for f in files:
+        try:
+            rel = str(f.relative_to(root) if root.is_dir() else f.name)
+            file_sources[rel] = f.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            pass
+
+    api_key = getattr(args, "api_key", None) or os.environ.get("ANTHROPIC_API_KEY", "")
+    backend = getattr(args, "backend", "anthropic")
+    model   = getattr(args, "model", "codellama:7b")
+    host    = getattr(args, "host", "http://localhost:11434")
+
+    info(f"Pass 1  SIR structural scan ...")
+    info(f"Pass 2  AI semantic check ({backend}) ...")
+    print()
+
+    spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+    spin_i  = [0]
+
+    def progress(current, total, label):
+        sp = spinner[spin_i[0] % len(spinner)]
+        spin_i[0] += 1
+        print(f"\r  {_c(sp, CYAN)}  {current}/{total}  {_c(label[:60], DIM)}      ", end="", flush=True)
+
+    results = semantic_scan(
+        file_sources,
+        backend=backend,
+        api_key=api_key,
+        ollama_model=model,
+        ollama_host=host,
+        min_confidence=args.min_confidence,
+        progress_cb=progress if not args.no_progress else None,
+    )
+
+    if results.candidate_pairs:
+        print()  # clear spinner line
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    print()
+    sir_dup_count = sum(len(c.members) for c in results.sir_duplicates)
+    cols = [
+        ("Functions scanned",      str(results.total_functions)),
+        ("SIR duplicates found",   str(sir_dup_count)),
+        ("AI pairs checked",       str(results.candidate_pairs)),
+        ("Semantic dupes found",   str(len(results.semantic_duplicates))),
+        ("Trivial fns skipped",    str(results.skipped_trivial)),
+    ]
+    for label_, value in cols:
+        print(f"  {_c(label_, DIM):<26} {_c(value, BOLD)}")
+
+    # ── Pass 1 results ────────────────────────────────────────────────────────
+    if results.sir_duplicates:
+        print()
+        print(_c(f"  Pass 1 — SIR exact duplicates ({len(results.sir_duplicates)} cluster(s)):", BOLD))
+        for cluster in results.sir_duplicates:
+            print()
+            print(f"  {_c('●', RED)}  {len(cluster.members)} copies  {_c(cluster.sir_hash[:16]+'...', DIM)}")
+            for fn in cluster.members:
+                print(f"     {_c(fn.name, CYAN)}  {_c(fn.file, BOLD)}  line {fn.lineno}")
+    else:
+        print()
+        ok("Pass 1 — no structural duplicates found.")
+
+    # ── Pass 2 results ────────────────────────────────────────────────────────
+    if results.semantic_duplicates:
+        print()
+        print(_c(f"  Pass 2 — AI semantic duplicates ({len(results.semantic_duplicates)} pair(s)):", BOLD))
+        for pair in results.semantic_duplicates:
+            conf_col = GREEN if pair.confidence == "HIGH" else YELLOW
+            print()
+            print(f"  {_c('◈', CYAN)}  {_c(pair.confidence + '  confidence', conf_col)}")
+            print(f"     {_c(pair.func_a.name, CYAN)}  {_c(pair.func_a.file, BOLD)}  line {pair.func_a.lineno}")
+            print(f"     {_c(pair.func_b.name, CYAN)}  {_c(pair.func_b.file, BOLD)}  line {pair.func_b.lineno}")
+            print(f"     {_c('reason: ' + pair.reason, DIM)}")
+    else:
+        print()
+        ok("Pass 2 — no semantic duplicates found.")
+
+    # ── Optional JSON report ──────────────────────────────────────────────────
+    if args.output:
+        report = {
+            "scanned_path": str(root),
+            "total_functions": results.total_functions,
+            "sir_clusters": len(results.sir_duplicates),
+            "semantic_pairs": len(results.semantic_duplicates),
+            "ai_pairs_checked": results.candidate_pairs,
+            "sir_duplicates": [
+                {
+                    "sir_hash": c.sir_hash,
+                    "members": [{"name": f.name, "file": f.file, "lineno": f.lineno}
+                                for f in c.members],
+                }
+                for c in results.sir_duplicates
+            ],
+            "semantic_duplicates": [
+                {
+                    "confidence": p.confidence,
+                    "reason": p.reason,
+                    "func_a": {"name": p.func_a.name, "file": p.func_a.file, "lineno": p.func_a.lineno},
+                    "func_b": {"name": p.func_b.name, "file": p.func_b.file, "lineno": p.func_b.lineno},
+                }
+                for p in results.semantic_duplicates
+            ],
+        }
+        Path(args.output).write_text(json.dumps(report, indent=2))
+        ok(f"Report saved to {args.output}")
+
+    if args.strict and (results.sir_duplicates or results.semantic_duplicates):
+        print()
+        err(f"Strict mode: {len(results.sir_duplicates)} SIR cluster(s), "
+            f"{len(results.semantic_duplicates)} semantic pair(s) found.")
+        return 1
+
+    return 0
+
+
+# ─────────────────────────────────────────────
+#  ai-health command
+# ─────────────────────────────────────────────
+
+def cmd_ai_health(args: argparse.Namespace) -> int:
+    """Check AI backend availability and run a live translation smoke test."""
+    try:
+        from sir_ai_translate import check_ollama, get_ollama_models, cache_stats
+        from sir2_core import translate_class_to_python, extract_classes as _ec
+    except ImportError as e:
+        err(f"Import failed: {e}")
+        return 1
+
+    header("SIR Engine — AI Backend Health Check")
+
+    api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    backend = args.backend
+
+    # ── Backend reachability ──────────────────────────────────────────────────
+    print()
+    print(_c("  Backend status:", BOLD))
+
+    if backend == "ollama":
+        ollama_ok = check_ollama(args.host)
+        if ollama_ok:
+            ok(f"Ollama reachable at {args.host}")
+            models = get_ollama_models(args.host)
+            if models:
+                ok(f"Models available: {', '.join(models)}")
+                if args.model not in models:
+                    warn(f"Requested model {args.model!r} not found — will use first available")
+            else:
+                warn("Ollama running but no models installed")
+                info("Run: ollama pull codellama:7b")
+                return 1
+        else:
+            err(f"Ollama not reachable at {args.host}")
+            info("Start Ollama with: ollama serve")
+            return 1
+    else:
+        if api_key:
+            ok("ANTHROPIC_API_KEY is set")
+        else:
+            err("ANTHROPIC_API_KEY not set")
+            info("Set it with: export ANTHROPIC_API_KEY=sk-...")
+            return 1
+
+    # ── Cache stats ───────────────────────────────────────────────────────────
+    stats = cache_stats()
+    print()
+    print(_c("  Translation cache:", BOLD))
+    info(f"Cached translations: {stats['total']}  "
+         f"(HIGH: {stats.get('HIGH', 0)}, "
+         f"MEDIUM: {stats.get('MEDIUM', 0)}, "
+         f"LOW: {stats.get('LOW', 0)}, "
+         f"FAILED: {stats.get('FAILED', 0)})")
+
+    # ── Live smoke test ───────────────────────────────────────────────────────
+    print()
+    print(_c("  Live translation smoke test:", BOLD))
+    info("Translating a Java Counter class → Python...")
+
+    SMOKE_JAVA = """\
+public class Counter {
+    private int count;
+    public Counter() { this.count = 0; }
+    public void increment() { this.count = this.count + 1; }
+    public int getCount() { return this.count; }
+}"""
+
+    result = translate_class_to_python(
+        SMOKE_JAVA,
+        language="Java",
+        backend=backend,
+        api_key=api_key,
+        ollama_model=args.model,
+        ollama_host=args.host,
+        use_cache=True,
+        confidence_check=True,
+    )
+
+    conf = result.get("confidence", "FAILED")
+    py_src = result.get("python_src", "")
+    cache_hit = result.get("cache_hit", False)
+
+    if conf == "FAILED" or not py_src:
+        err(f"Translation failed: {result.get('error', 'no output')}")
+        return 1
+
+    ok(f"Translation succeeded  confidence={conf}{'  (cached)' if cache_hit else ''}")
+
+    # Verify it flows through the V2 hash pipeline
+    try:
+        classes = _ec(py_src, "<smoke_test>")
+        if classes:
+            ok(f"V2 hash pipeline: class '{classes[0].name}' extracted, "
+               f"{len(classes[0].methods)} method(s), "
+               f"hash={classes[0].class_hash[:16]}...")
+        else:
+            warn("V2 hash pipeline: translation valid but no class extracted")
+    except Exception as e:
+        warn(f"V2 hash pipeline check failed: {e}")
+
+    print()
+    ok("AI translation pipeline is working")
+    info("Run full tests with: python3 test_ai_translation.py")
     return 0
 
 
@@ -803,7 +1085,7 @@ Examples:
     p_ai.set_defaults(func=cmd_ai_scan)
 
     # ── class-scan ─────────────────────────────
-    p_class = sub.add_parser("class-scan", help="Scan Python files for duplicate classes (V2 engine)")
+    p_class = sub.add_parser("class-scan", help="Scan for duplicate classes — Python natively, Java/Kotlin/Swift/C# etc. via AI (V2 engine)")
     p_class.add_argument("path", help="File or directory to scan")
     p_class.add_argument("--min-similarity", type=float, default=1.0, metavar="F",
                          help="Similarity threshold 0.0–1.0 for partial matches (default: 1.0 = exact only)")
@@ -815,12 +1097,58 @@ Examples:
                          help="Exit with code 1 if any duplicates found (for CI/CD)")
     p_class.add_argument("--no-recurse", action="store_true",
                          help="Do not recurse into subdirectories")
+    p_class.add_argument("--backend", choices=["ollama", "anthropic"], default="anthropic",
+                         help="AI backend for non-Python files (default: anthropic)")
+    p_class.add_argument("--model", default="codellama:7b", metavar="MODEL",
+                         help="Ollama model name (default: codellama:7b)")
+    p_class.add_argument("--host", default="http://localhost:11434", metavar="URL",
+                         help="Ollama host URL (default: http://localhost:11434)")
+    p_class.add_argument("--api-key", metavar="KEY",
+                         help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
+    p_class.add_argument("--no-cache", action="store_true",
+                         help="Disable translation cache — force fresh AI translations")
     p_class.set_defaults(func=cmd_class_scan)
 
     # ── health ─────────────────────────────────
     p_health = sub.add_parser("health", help="Show health score for a codebase")
     p_health.add_argument("path", help="File or directory to score")
     p_health.set_defaults(func=cmd_health)
+
+    # ── semantic-scan ──────────────────────────
+    p_sem = sub.add_parser("semantic-scan",
+                           help="Two-pass scan: SIR structural first, then AI semantic check on the rest")
+    p_sem.add_argument("path", help="File or directory to scan")
+    p_sem.add_argument("--backend", choices=["ollama", "anthropic"], default="anthropic",
+                       help="AI backend for pass 2 (default: anthropic)")
+    p_sem.add_argument("--model", default="codellama:7b", metavar="MODEL",
+                       help="Ollama model name (default: codellama:7b)")
+    p_sem.add_argument("--host", default="http://localhost:11434", metavar="URL",
+                       help="Ollama host URL")
+    p_sem.add_argument("--api-key", metavar="KEY",
+                       help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
+    p_sem.add_argument("--min-confidence", choices=["HIGH", "MEDIUM"], default="MEDIUM",
+                       help="Minimum AI confidence to include a semantic match (default: MEDIUM)")
+    p_sem.add_argument("--output", "-o", metavar="FILE",
+                       help="Save JSON report to FILE")
+    p_sem.add_argument("--strict", action="store_true",
+                       help="Exit with code 1 if any duplicates found (CI/CD)")
+    p_sem.add_argument("--no-recurse", action="store_true",
+                       help="Do not recurse into subdirectories")
+    p_sem.add_argument("--no-progress", action="store_true",
+                       help="Suppress the AI pair-checking progress spinner")
+    p_sem.set_defaults(func=cmd_semantic_scan)
+
+    # ── ai-health ──────────────────────────────
+    p_aihealth = sub.add_parser("ai-health", help="Check AI backend health and run a live translation smoke test")
+    p_aihealth.add_argument("--backend", choices=["ollama", "anthropic"], default="anthropic",
+                            help="AI backend to check (default: anthropic)")
+    p_aihealth.add_argument("--model", default="codellama:7b", metavar="MODEL",
+                            help="Ollama model name (default: codellama:7b)")
+    p_aihealth.add_argument("--host", default="http://localhost:11434", metavar="URL",
+                            help="Ollama host URL (default: http://localhost:11434)")
+    p_aihealth.add_argument("--api-key", metavar="KEY",
+                            help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
+    p_aihealth.set_defaults(func=cmd_ai_health)
 
     # ── diff ───────────────────────────────────
     p_diff = sub.add_parser("diff", help="Compare two codebases semantically")
